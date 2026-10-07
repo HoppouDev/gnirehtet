@@ -636,8 +636,8 @@ impl TcpConnection {
             );
             self.tcb.fin_sequence_number = Some(self.tcb.sequence_number.0);
             self.tcb.sequence_number += Wrapping(1); // FIN counts for 1 byte
-                                                     // the connection will be closed by RAII, so switch immediately to LastAck
-                                                     // (bypass CloseWait)
+            // the connection will be closed by RAII, so switch immediately to LastAck
+            // (bypass CloseWait)
             self.tcb.state = TcpState::LastAck;
             cx_debug!(target: TAG, self.id, "State = {:?}", self.tcb.state);
         } else if self.tcb.state == TcpState::FinWait1 {

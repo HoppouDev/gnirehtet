@@ -16,7 +16,7 @@
 
 use super::ipv4_header::{Ipv4HeaderData, Protocol};
 use super::tcp_header::{TcpHeader, TcpHeaderData, TcpHeaderMut};
-use super::udp_header::{UdpHeader, UdpHeaderData, UdpHeaderMut, UDP_HEADER_LENGTH};
+use super::udp_header::{UDP_HEADER_LENGTH, UdpHeader, UdpHeaderData, UdpHeaderMut};
 
 pub enum TransportHeader<'a> {
     Tcp(TcpHeader<'a>),
