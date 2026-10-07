@@ -14,7 +14,7 @@ slab = "0.4"      # helper for mio Tokens
 log = "0.4"       # for logs
 chrono = "0.4"    # for formatting timestamp in logs
 byteorder = "1.3" # for reading/writing binary
-rand = "0.7"      # for random TCP sequence number
+rand = "0.10"      # for random TCP sequence number
 ctrlc = { version = "3.0", features = ["termination"] }     # for handling Ctrl+C
 
 [profile.release]
