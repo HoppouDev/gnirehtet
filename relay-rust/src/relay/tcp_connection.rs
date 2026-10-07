@@ -225,7 +225,10 @@ impl TcpConnection {
                     if self.tcb.state == TcpState::SynSent {
                         // writable is first triggered when the stream is connected
                         self.process_connect(selector);
-                    } else {
+                    } else if self.may_write() {
+                        // mio may report a spurious writable event (notably on Windows, where
+                        // readiness is emulated over IOCP) after the buffer was drained. Writing
+                        // an empty buffer returns 0, which process_send() treats as closed.
                         self.process_send(selector)?;
                     }
                 }
