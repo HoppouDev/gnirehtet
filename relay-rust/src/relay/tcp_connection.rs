@@ -313,7 +313,7 @@ impl TcpConnection {
         let max_payload_length =
             Some(cmp::min(remaining_client_window, MAX_PAYLOAD_LENGTH) as usize);
         Self::update_headers(
-            &mut self.network_to_client,
+            self.network_to_client.transport_header_mut(),
             &self.tcb,
             tcp_header::FLAG_ACK | tcp_header::FLAG_PSH,
         );
@@ -459,8 +459,8 @@ impl TcpConnection {
         }
     }
 
-    fn update_headers(packetizer: &mut Packetizer, tcb: &Tcb, flags: u16) {
-        let mut tcp_header = Self::tcp_header_of_transport_mut(packetizer.transport_header_mut());
+    fn update_headers(transport_header: TransportHeaderMut, tcb: &Tcb, flags: u16) {
+        let mut tcp_header = Self::tcp_header_of_transport_mut(transport_header);
         tcp_header.set_sequence_number(tcb.sequence_number.0);
         tcp_header.set_acknowledgement_number(tcb.acknowledgement_number.0);
         tcp_header.set_flags(flags);
@@ -716,7 +716,7 @@ impl TcpConnection {
         tcb: &Tcb,
         flags: u16,
     ) -> Ipv4Packet<'a> {
-        Self::update_headers(packetizer, tcb, flags);
+        Self::update_headers(packetizer.empty_transport_header_mut(), tcb, flags);
         cx_debug!(
             target: TAG,
             id,
