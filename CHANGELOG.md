@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v3.0.0](https://github.com/HoppouDev/gnirehtet/compare/3d4d9361222668d3633a33abdd348337a2f9a1d1..v3.0.0) - 2026-10-07
+#### Features
+- (**relay**) configure logs with RUST_LOG using tracing - ([38225d6](https://github.com/HoppouDev/gnirehtet/commit/38225d618abbe7b7bb0c294a27d8e15330df93a5)) - HoppouDev
+#### Refactoring
+- ![BREAKING](https://img.shields.io/badge/BREAKING-red) remove the java relay and move the rust relay to relay/ - ([3d4d936](https://github.com/HoppouDev/gnirehtet/commit/3d4d9361222668d3633a33abdd348337a2f9a1d1)) - HoppouDev
+
+- - -
+
 ## [v2.5.2](https://github.com/HoppouDev/gnirehtet/compare/1eb2e58bc91e268dba62561d11e3bebd9b100883..v2.5.2) - 2026-10-07
 #### Bug Fixes
 - (**relay**) build empty TCP packets apart from pending data packets - ([6dd8273](https://github.com/HoppouDev/gnirehtet/commit/6dd82737ea862a25550b6c4f25c6217231ddbc74)) - HoppouDev
