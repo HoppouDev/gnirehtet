@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 
-use log::*;
 use std::io;
 use tokio::runtime;
+use tracing::info;
 
 use super::tunnel_server;
 

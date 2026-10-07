@@ -19,8 +19,8 @@ use super::byte_buffer::ByteBuffer;
 use super::ipv4_header;
 use super::ipv4_packet::{Ipv4Packet, MAX_PACKET_LENGTH};
 
-use log::*;
 use std::io;
+use tracing::trace;
 
 pub struct Ipv4PacketBuffer {
     buf: ByteBuffer,

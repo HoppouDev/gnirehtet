@@ -14,46 +14,25 @@
  * limitations under the License.
  */
 
-use chrono::prelude::Local;
-use log::*;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal};
+use tracing::Level;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::fmt::time::ChronoLocal;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
-static LOGGER: SimpleLogger = SimpleLogger;
-const THRESHOLD: LevelFilter = LevelFilter::Info;
-
-pub struct SimpleLogger;
-
-impl Log for SimpleLogger {
-    fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= THRESHOLD
-    }
-
-    fn log(&self, record: &Record) {
-        if self.enabled(record.metadata()) {
-            let date = Local::now();
-            let formatted_date = date.format("%Y-%m-%d %H:%M:%S%.3f");
-            let msg = format!(
-                "{} {} {}: {}",
-                formatted_date,
-                record.level(),
-                record.target(),
-                record.args()
-            );
-            if record.level() == Level::Error {
-                eprintln!("{}", msg);
-            } else {
-                println!("{}", msg);
-            }
-        }
-    }
-
-    fn flush(&self) {
-        io::stdout().flush().unwrap();
-        io::stderr().flush().unwrap();
-    }
-}
-
-pub fn init() -> Result<(), SetLoggerError> {
-    set_max_level(THRESHOLD);
-    set_logger(&LOGGER)
+/// Print the logs to stdout, and the errors to stderr
+///
+/// The logs are filtered by the `RUST_LOG` environment variable (`info` by default).
+pub fn init() {
+    let filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_timer(ChronoLocal::new("%Y-%m-%d %H:%M:%S%.3f".to_owned()))
+        .with_writer(io::stderr.with_max_level(Level::ERROR).or_else(io::stdout))
+        // no color codes when the output is redirected to a file
+        .with_ansi(io::stdout().is_terminal())
+        .init();
 }

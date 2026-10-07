@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-use log::*;
 use rand::random;
 use std::cmp;
 use std::io;
@@ -23,6 +22,7 @@ use std::num::Wrapping;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::coop;
+use tracing::Level;
 
 use super::binary;
 use super::client::ClientSender;
@@ -628,7 +628,7 @@ impl TcpConnection {
             return;
         }
 
-        if log_enabled!(target: TAG, Level::Trace) {
+        if tracing::enabled!(target: TAG, Level::TRACE) {
             cx_trace!(
                 target: TAG,
                 self.id,
@@ -670,7 +670,7 @@ impl TcpConnection {
             cx_debug!(target: TAG, id, "Acking {}", tcb.numbers());
         }
         let ipv4_packet = packetizer.packetize_empty_payload();
-        if log_enabled!(target: TAG, Level::Trace) {
+        if tracing::enabled!(target: TAG, Level::TRACE) {
             cx_trace!(
                 target: TAG,
                 id,

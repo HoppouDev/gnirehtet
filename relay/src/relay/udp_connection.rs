@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-use log::*;
 use std::io;
 use std::net::{self, Ipv4Addr};
 use std::time::Duration;
@@ -22,6 +21,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::coop;
 use tokio::time::{self, Instant};
+use tracing::Level;
 
 use super::binary;
 use super::client::ClientSender;
@@ -158,7 +158,7 @@ impl UdpConnection {
                 return false;
             }
         };
-        if log_enabled!(target: TAG, Level::Trace) {
+        if tracing::enabled!(target: TAG, Level::TRACE) {
             cx_trace!(
                 target: TAG,
                 self.id,

@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 
-use log::*;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
+use tracing::{Level, error, trace, warn};
 
 use super::binary;
 use super::client::ClientSender;
@@ -55,7 +55,7 @@ impl Router {
     pub fn send_to_network(&mut self, ipv4_packet: &Ipv4Packet) {
         if !ipv4_packet.is_valid() {
             warn!(target: TAG, "Dropping invalid packet");
-            if log_enabled!(target: TAG, Level::Trace) {
+            if tracing::enabled!(target: TAG, Level::TRACE) {
                 trace!(
                     target: TAG,
                     "{}",

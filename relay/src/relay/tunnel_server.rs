@@ -14,12 +14,12 @@
  * limitations under the License.
  */
 
-use log::*;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::time;
+use tracing::{error, info};
 
 use super::client;
 

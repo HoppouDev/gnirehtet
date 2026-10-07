@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-use log::*;
 use relaylib::byte_buffer::ByteBuffer;
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -22,6 +21,7 @@ use std::process;
 use std::str;
 use std::thread;
 use std::time::Duration;
+use tracing::{error, info};
 
 const TAG: &str = "AdbMonitor";
 

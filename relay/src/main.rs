@@ -14,10 +14,7 @@
  * limitations under the License.
  */
 
-extern crate chrono;
 extern crate ctrlc;
-#[macro_use]
-extern crate log;
 extern crate relaylib;
 
 mod adb_monitor;
@@ -32,6 +29,7 @@ use std::env;
 use std::process::{self, exit};
 use std::thread;
 use std::time::Duration;
+use tracing::{debug, error, info};
 
 const TAG: &str = "Main";
 const REQUIRED_APK_VERSION_CODE: &str = "9";
@@ -620,7 +618,7 @@ fn print_command_usage(command: &dyn Command) {
 }
 
 fn main() {
-    logger::init().unwrap();
+    logger::init();
     let mut args = env::args();
     // args.nth(1) will consume the two first arguments (the binary name and the command name)
     if let Some(command_name) = args.nth(1) {

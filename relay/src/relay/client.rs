@@ -14,12 +14,12 @@
  * limitations under the License.
  */
 
-use log::*;
 use std::io;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
+use tracing::{debug, error};
 
 use super::binary;
 use super::datagram::TryRead;

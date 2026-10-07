@@ -190,6 +190,16 @@ ADB=/path/to/my/adb ./gnirehtet run
 GNIREHTET_APK=/usr/share/gnirehtet/gnirehtet.apk ./gnirehtet run
 ```
 
+`RUST_LOG` sets which logs are printed (`info` by default), for example to
+print debug logs:
+
+```bash
+RUST_LOG=debug ./gnirehtet run
+```
+
+It also accepts per-component levels, such as
+`RUST_LOG=info,TcpConnection=debug`.
+
 
 ## Why _gnirehtet_?
 
