@@ -16,7 +16,7 @@
 
 use log::*;
 use mio::net::TcpStream;
-use mio::{Event, PollOpt, Ready, Token};
+use mio::{Interest, Token};
 use rand::random;
 use std::cell::RefCell;
 use std::cmp;
@@ -31,7 +31,7 @@ use super::ipv4_header::Ipv4Header;
 use super::ipv4_packet::{Ipv4Packet, MAX_PACKET_LENGTH};
 use super::packet_source::PacketSource;
 use super::packetizer::Packetizer;
-use super::selector::Selector;
+use super::selector::{Readiness, Selector};
 use super::stream_buffer::StreamBuffer;
 use super::tcp_header::{self, TcpHeader, TcpHeaderMut};
 use super::transport_header::{TransportHeader, TransportHeaderMut};
@@ -48,8 +48,10 @@ pub struct TcpConnection {
     id: ConnectionId,
     client: Weak<RefCell<Client>>,
     stream: TcpStream,
-    interests: Ready,
     token: Token,
+    // last readiness reported by the selector, until an operation returns WouldBlock
+    readable: bool,
+    writable: bool,
     client_to_network: StreamBuffer,
     network_to_client: Packetizer,
     packet_for_client_length: Option<u16>,
@@ -161,16 +163,14 @@ impl TcpConnection {
 
         let packetizer = Packetizer::new(&ipv4_header, &shrinked_transport_header);
 
-        // interests will be set on the first packet received
-        // set the initial value now so that they won't need to be updated
-        let interests = Ready::writable();
         let rc = Rc::new(RefCell::new(Self {
             self_weak: Weak::new(),
             id,
             client,
             stream,
-            interests,
             token: Token(0), // default value, will be set afterwards
+            readable: false,
+            writable: false,
             client_to_network: StreamBuffer::new(4 * MAX_PACKET_LENGTH),
             network_to_client: packetizer,
             packet_for_client_length: None,
@@ -186,17 +186,22 @@ impl TcpConnection {
 
             let rc2 = rc.clone();
             // must annotate selector type: https://stackoverflow.com/a/44004103/1987178
-            let handler =
-                move |selector: &mut Selector, event| rc2.borrow_mut().on_ready(selector, event);
-            let token =
-                selector.register(&self_ref.stream, handler, interests, PollOpt::level())?;
+            let handler = move |selector: &mut Selector, readiness| {
+                rc2.borrow_mut().on_ready(selector, readiness)
+            };
+            // the stream becomes writable once connected
+            let token = selector.register(
+                &mut self_ref.stream,
+                handler,
+                Interest::READABLE | Interest::WRITABLE,
+            )?;
             self_ref.token = token;
         }
         Ok(rc)
     }
 
     fn create_stream(id: &ConnectionId) -> io::Result<TcpStream> {
-        TcpStream::connect(&id.rewritten_destination().into())
+        TcpStream::connect(id.rewritten_destination().into())
     }
 
     fn remove_from_router(&self) {
@@ -206,101 +211,116 @@ impl TcpConnection {
         client.router().remove(self);
     }
 
-    fn on_ready(&mut self, selector: &mut Selector, event: Event) {
-        #[allow(clippy::match_wild_err_arm)]
-        match self.process(selector, event) {
-            Ok(_) => (),
-            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                cx_debug!(target: TAG, self.id, "Spurious event, ignoring")
+    fn on_ready(&mut self, selector: &mut Selector, readiness: Readiness) {
+        self.readable |= readiness.readable;
+        self.writable |= readiness.writable;
+        if self.closed {
+            return;
+        }
+        if self.tcb.state == TcpState::SynSent {
+            if self.writable {
+                self.check_connected(selector);
             }
-            Err(_) => panic!("Unexpected unhandled error"),
+        } else {
+            if self.writable && self.may_write() {
+                self.process_send(selector);
+            }
+            if !self.closed && self.readable && self.may_read() {
+                self.process_receive(selector);
+            }
+        }
+        if self.closed {
+            // on_ready is not called from the router, so the connection must remove itself
+            self.remove_from_router();
         }
     }
-    // return Err(err) with err.kind() == io::ErrorKind::WouldBlock on spurious event
-    fn process(&mut self, selector: &mut Selector, event: Event) -> io::Result<()> {
-        if !self.closed {
-            let ready = event.readiness();
-            if ready.is_readable() || ready.is_writable() {
-                if ready.is_writable() {
-                    if self.tcb.state == TcpState::SynSent {
-                        // writable is first triggered when the stream is connected
-                        self.process_connect(selector);
-                    } else if self.may_write() {
-                        // mio may report a spurious writable event (notably on Windows, where
-                        // readiness is emulated over IOCP) after the buffer was drained. Writing
-                        // an empty buffer returns 0, which process_send() treats as closed.
-                        self.process_send(selector)?;
-                    }
-                }
-                if !self.closed && ready.is_readable() {
-                    self.process_receive(selector)?;
-                }
-                if !self.closed {
-                    self.update_interests(selector);
-                }
-            } else {
-                cx_debug!(target: TAG, self.id, "received ready = {:?}", ready);
-                // error or hup
+
+    /// Request a call to on_ready() if some I/O may now be performed
+    ///
+    /// To be used when the state changes outside of on_ready() (the client may be borrowed).
+    fn wake_if_ready(&self, selector: &mut Selector) {
+        let connecting = self.tcb.state == TcpState::SynSent;
+        if (self.writable && (connecting || self.may_write())) || (self.readable && self.may_read())
+        {
+            selector.wake(self.token);
+        }
+    }
+
+    fn check_connected(&mut self, selector: &mut Selector) {
+        // a writable event does not guarantee that the connection succeeded
+        match self.stream.take_error() {
+            Ok(None) => (),
+            Ok(Some(err)) | Err(err) => {
+                cx_error!(target: TAG, self.id, "Cannot connect: {}", err);
                 self.close(selector);
-            }
-            if self.closed {
-                // on_ready is not called from the router, so the connection must remove itself
-                self.remove_from_router();
+                return;
             }
         }
-        Ok(())
-    }
-
-    // return Err(err) with err.kind() == io::ErrorKind::WouldBlock on spurious event
-    fn process_send(&mut self, selector: &mut Selector) -> io::Result<()> {
-        match self.client_to_network.write_to(&mut self.stream) {
-            Ok(w) => {
-                if w != 0 {
-                    self.tcb.acknowledgement_number += Wrapping(w as u32);
-
-                    if self.tcb.fin_received && self.client_to_network.is_empty() {
-                        let client_rc = self.client.upgrade().expect("Expected client not found");
-                        let mut client = client_rc.borrow_mut();
-                        cx_debug!(
-                            target: TAG,
-                            self.id,
-                            "No more pending data, process the pending FIN"
-                        );
-                        self.do_handle_fin(selector, &mut client.channel());
-                    } else {
-                        cx_debug!(
-                            target: TAG,
-                            self.id,
-                            "Sending ACK {} to client",
-                            self.tcb.numbers()
-                        );
-                        self.send_empty_packet_to_client(selector, tcp_header::FLAG_ACK);
-                    }
-                } else {
-                    self.close(selector);
-                }
-            }
+        match self.stream.peer_addr() {
+            Ok(_) => self.process_connect(selector),
+            // not connected yet, wait for the next writable event
+            Err(err) if err.kind() == io::ErrorKind::NotConnected => self.writable = false,
             Err(err) => {
-                if err.kind() == io::ErrorKind::WouldBlock {
-                    // rethrow
-                    return Err(err);
-                }
-                cx_error!(
-                    target: TAG,
-                    self.id,
-                    "Cannot write: [{:?}] {}",
-                    err.kind(),
-                    err
-                );
-                self.send_empty_packet_to_client(selector, tcp_header::FLAG_RST);
+                cx_error!(target: TAG, self.id, "Cannot connect: {}", err);
                 self.close(selector);
             }
         }
-        Ok(())
     }
 
-    // return Err(err) with err.kind() == io::ErrorKind::WouldBlock on spurious event
-    fn process_receive(&mut self, selector: &mut Selector) -> io::Result<()> {
+    fn process_send(&mut self, selector: &mut Selector) {
+        let mut written = 0;
+        while !self.client_to_network.is_empty() {
+            match self.client_to_network.write_to(&mut self.stream) {
+                Ok(0) => {
+                    cx_error!(target: TAG, self.id, "Cannot write: the socket accepts no data");
+                    self.close(selector);
+                    return;
+                }
+                Ok(w) => written += w,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    self.writable = false;
+                    break;
+                }
+                Err(err) => {
+                    cx_error!(
+                        target: TAG,
+                        self.id,
+                        "Cannot write: [{:?}] {}",
+                        err.kind(),
+                        err
+                    );
+                    self.send_empty_packet_to_client(selector, tcp_header::FLAG_RST);
+                    self.close(selector);
+                    return;
+                }
+            }
+        }
+        if written == 0 {
+            return;
+        }
+
+        self.tcb.acknowledgement_number += Wrapping(written as u32);
+        if self.tcb.fin_received && self.client_to_network.is_empty() {
+            let client_rc = self.client.upgrade().expect("Expected client not found");
+            let mut client = client_rc.borrow_mut();
+            cx_debug!(
+                target: TAG,
+                self.id,
+                "No more pending data, process the pending FIN"
+            );
+            self.do_handle_fin(selector, &mut client.channel());
+        } else {
+            cx_debug!(
+                target: TAG,
+                self.id,
+                "Sending ACK {} to client",
+                self.tcb.numbers()
+            );
+            self.send_empty_packet_to_client(selector, tcp_header::FLAG_ACK);
+        }
+    }
+
+    fn process_receive(&mut self, selector: &mut Selector) {
         assert!(
             self.packet_for_client_length.is_none(),
             "A pending packet was not sent"
@@ -333,6 +353,8 @@ impl TcpConnection {
                             self.tcb.numbers()
                         );
                         self.tcb.sequence_number += Wrapping(len as u32);
+                        // read one chunk per iteration, so that connections are processed in turn
+                        selector.wake(self.token);
                     }
                     Err(_) => {
                         // ask to the client to pull when its buffer is not full
@@ -347,11 +369,8 @@ impl TcpConnection {
             Ok(None) => {
                 self.eof(selector);
             }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => self.readable = false,
             Err(err) => {
-                if err.kind() == io::ErrorKind::WouldBlock {
-                    // rethrow
-                    return Err(err);
-                }
                 cx_error!(
                     target: TAG,
                     self.id,
@@ -363,7 +382,6 @@ impl TcpConnection {
                 self.close(selector);
             }
         }
-        Ok(())
     }
 
     fn process_connect(&mut self, selector: &mut Selector) {
@@ -739,30 +757,6 @@ impl TcpConnection {
         ipv4_packet
     }
 
-    fn update_interests(&mut self, selector: &mut Selector) {
-        assert!(!self.closed);
-        let mut ready = Ready::empty();
-        if self.tcb.state == TcpState::SynSent {
-            // waiting for connectable
-            ready = Ready::writable()
-        } else {
-            if self.may_read() {
-                ready |= Ready::readable()
-            }
-            if self.may_write() {
-                ready |= Ready::writable()
-            }
-        }
-        cx_debug!(target: TAG, self.id, "interests: {:?}", ready);
-        if self.interests != ready {
-            // interests must be changed
-            self.interests = ready;
-            selector
-                .reregister(&self.stream, self.token, ready, PollOpt::level())
-                .expect("Cannot register on poll");
-        }
-    }
-
     fn may_read(&self) -> bool {
         if !self.tcb.state.is_connected() || self.tcb.state.is_closed() {
             return false;
@@ -792,14 +786,14 @@ impl Connection for TcpConnection {
     ) {
         self.handle_packet(selector, client_channel, ipv4_packet);
         if !self.closed {
-            self.update_interests(selector);
+            self.wake_if_ready(selector);
         }
     }
 
     fn close(&mut self, selector: &mut Selector) {
         cx_info!(target: TAG, self.id, "Close");
         self.closed = true;
-        if let Err(err) = selector.deregister(&self.stream, self.token) {
+        if let Err(err) = selector.deregister(&mut self.stream, self.token) {
             // do not panic, this can happen in mio
             // see <https://github.com/Genymobile/gnirehtet/issues/136>
             cx_warn!(
@@ -844,6 +838,6 @@ impl PacketSource for TcpConnection {
         );
         self.tcb.sequence_number += Wrapping(u32::from(len));
         self.packet_for_client_length = None;
-        self.update_interests(selector);
+        self.wake_if_ready(selector);
     }
 }

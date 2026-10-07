@@ -15,24 +15,47 @@
  */
 
 use log::*;
-use mio::{Event, Evented, Events, Poll, PollOpt, Ready, Token};
+use mio::event::{Event, Source};
+use mio::{Events, Interest, Poll, Token};
 use slab::Slab;
 use std::io;
+use std::mem;
 use std::rc::Rc;
 use std::time::Duration;
 
 const TAG: &str = "Selector";
 
+/// Readiness reported to an event handler.
+///
+/// mio only provides edge-triggered notifications, so handlers must remember the readiness they
+/// received until the corresponding operation returns `WouldBlock`. Error and close notifications
+/// are folded into both flags: the actual read or write reports what happened.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Readiness {
+    pub readable: bool,
+    pub writable: bool,
+}
+
+impl Readiness {
+    fn from_event(event: &Event) -> Self {
+        let error = event.is_error();
+        Self {
+            readable: event.is_readable() || event.is_read_closed() || error,
+            writable: event.is_writable() || event.is_write_closed() || error,
+        }
+    }
+}
+
 pub trait EventHandler {
-    fn on_ready(&self, selector: &mut Selector, event: Event);
+    fn on_ready(&self, selector: &mut Selector, readiness: Readiness);
 }
 
 impl<F> EventHandler for F
 where
-    F: Fn(&mut Selector, Event),
+    F: Fn(&mut Selector, Readiness),
 {
-    fn on_ready(&self, selector: &mut Selector, event: Event) {
-        self(selector, event);
+    fn on_ready(&self, selector: &mut Selector, readiness: Readiness) {
+        self(selector, readiness);
     }
 }
 
@@ -41,6 +64,8 @@ pub struct Selector {
     handlers: Slab<Rc<dyn EventHandler>>,
     // tokens to be removed after all the current poll events are executed
     tokens_to_remove: Vec<Token>,
+    // handlers to call again (with no new readiness) once the current events are executed
+    wakes: Vec<Token>,
 }
 
 impl Selector {
@@ -49,22 +74,22 @@ impl Selector {
             poll: Poll::new()?,
             handlers: Slab::with_capacity(1024),
             tokens_to_remove: Vec::new(),
+            wakes: Vec::new(),
         })
     }
 
-    pub fn register<E, H>(
+    pub fn register<S, H>(
         &mut self,
-        handle: &E,
+        source: &mut S,
         handler: H,
-        interest: Ready,
-        opts: PollOpt,
+        interest: Interest,
     ) -> io::Result<Token>
     where
-        E: Evented + ?Sized,
+        S: Source + ?Sized,
         H: EventHandler + 'static,
     {
         let token = Token(self.handlers.insert(Rc::new(handler)));
-        if let Err(err) = self.poll.register(handle, token, interest, opts) {
+        if let Err(err) = self.poll.registry().register(source, token, interest) {
             // remove the token we just added
             self.handlers.remove(token.0);
             Err(err)
@@ -73,27 +98,27 @@ impl Selector {
         }
     }
 
-    pub fn reregister<E>(
-        &mut self,
-        handle: &E,
-        token: Token,
-        interest: Ready,
-        opts: PollOpt,
-    ) -> io::Result<()>
+    pub fn deregister<S>(&mut self, source: &mut S, token: Token) -> io::Result<()>
     where
-        E: Evented + ?Sized,
+        S: Source + ?Sized,
     {
-        self.poll.reregister(handle, token, interest, opts)
-    }
-
-    pub fn deregister<E>(&mut self, handle: &E, token: Token) -> io::Result<()>
-    where
-        E: Evented + ?Sized,
-    {
-        self.poll.deregister(handle)?;
+        self.poll.registry().deregister(source)?;
         // remove them before next poll()
         self.tokens_to_remove.push(token);
         Ok(())
+    }
+
+    /// Call the handler of `token` again after the current events, without new readiness.
+    ///
+    /// This lets a handler resume work that was blocked by something other than its socket (a
+    /// full client buffer, a closed TCP window...) without being re-entered from the code that
+    /// unblocked it.
+    pub fn wake(&mut self, token: Token) {
+        self.wakes.push(token);
+    }
+
+    pub fn has_wakes(&self) -> bool {
+        !self.wakes.is_empty()
     }
 
     fn clean_removed_tokens(&mut self) {
@@ -103,7 +128,13 @@ impl Selector {
         self.tokens_to_remove.clear();
     }
 
-    pub fn poll(&mut self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
+    pub fn poll(&mut self, events: &mut Events, timeout: Option<Duration>) -> io::Result<()> {
+        // pending wakes must run without waiting for new events
+        let timeout = if self.wakes.is_empty() {
+            timeout
+        } else {
+            Some(Duration::ZERO)
+        };
         self.poll.poll(events, timeout)
     }
 
@@ -112,10 +143,21 @@ impl Selector {
             debug!(target: TAG, "event={:?}", event);
             let handler = self
                 .handlers
-                .get_mut(event.token().0)
+                .get(event.token().0)
                 .expect("Token not found")
                 .clone();
-            handler.on_ready(self, event);
+            handler.on_ready(self, Readiness::from_event(event));
+        }
+
+        // wakes requested while running these ones are executed on the next iteration
+        let mut wakes = mem::take(&mut self.wakes);
+        wakes.sort_unstable();
+        wakes.dedup();
+        for token in wakes {
+            // the handler may have been removed since the wake was requested
+            if let Some(handler) = self.handlers.get(token.0).cloned() {
+                handler.on_ready(self, Readiness::default());
+            }
         }
 
         // remove the tokens marked as removed

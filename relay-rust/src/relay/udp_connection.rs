@@ -16,7 +16,7 @@
 
 use log::*;
 use mio::net::UdpSocket;
-use mio::{Event, PollOpt, Ready, Token};
+use mio::{Interest, Token};
 use std::cell::RefCell;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -30,7 +30,7 @@ use super::datagram_buffer::DatagramBuffer;
 use super::ipv4_header::Ipv4Header;
 use super::ipv4_packet::{Ipv4Packet, MAX_PACKET_LENGTH};
 use super::packetizer::Packetizer;
-use super::selector::Selector;
+use super::selector::{Readiness, Selector};
 use super::transport_header::TransportHeader;
 
 const TAG: &str = "UdpConnection";
@@ -41,8 +41,10 @@ pub struct UdpConnection {
     id: ConnectionId,
     client: Weak<RefCell<Client>>,
     socket: UdpSocket,
-    interests: Ready,
     token: Token,
+    // last readiness reported by the selector, until an operation returns WouldBlock
+    readable: bool,
+    writable: bool,
     client_to_network: DatagramBuffer,
     network_to_client: Packetizer,
     closed: bool,
@@ -61,13 +63,13 @@ impl UdpConnection {
         cx_info!(target: TAG, id, "Open");
         let socket = Self::create_socket(&id)?;
         let packetizer = Packetizer::new(&ipv4_header, &transport_header);
-        let interests = Ready::readable();
         let rc = Rc::new(RefCell::new(Self {
             id,
             client,
             socket,
-            interests,
             token: Token(0), // default value, will be set afterwards
+            readable: false,
+            writable: false,
             client_to_network: DatagramBuffer::new(4 * MAX_PACKET_LENGTH),
             network_to_client: packetizer,
             closed: false,
@@ -79,10 +81,14 @@ impl UdpConnection {
 
             let rc2 = rc.clone();
             // must anotate selector type: https://stackoverflow.com/a/44004103/1987178
-            let handler =
-                move |selector: &mut Selector, event| rc2.borrow_mut().on_ready(selector, event);
-            let token =
-                selector.register(&self_ref.socket, handler, interests, PollOpt::level())?;
+            let handler = move |selector: &mut Selector, readiness| {
+                rc2.borrow_mut().on_ready(selector, readiness)
+            };
+            let token = selector.register(
+                &mut self_ref.socket,
+                handler,
+                Interest::READABLE | Interest::WRITABLE,
+            )?;
             self_ref.token = token;
         }
         Ok(rc)
@@ -90,7 +96,7 @@ impl UdpConnection {
 
     fn create_socket(id: &ConnectionId) -> io::Result<UdpSocket> {
         let autobind_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
-        let udp_socket = UdpSocket::bind(&autobind_addr)?;
+        let udp_socket = UdpSocket::bind(autobind_addr)?;
         udp_socket.connect(id.rewritten_destination().into())?;
         Ok(udp_socket)
     }
@@ -102,78 +108,54 @@ impl UdpConnection {
         client.router().remove(self);
     }
 
-    fn on_ready(&mut self, selector: &mut Selector, event: Event) {
-        #[allow(clippy::match_wild_err_arm)]
-        match self.process(selector, event) {
-            Ok(_) => (),
-            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                cx_debug!(target: TAG, self.id, "Spurious event, ignoring")
-            }
-            Err(_) => panic!("Unexpected unhandled error"),
+    fn on_ready(&mut self, selector: &mut Selector, readiness: Readiness) {
+        self.readable |= readiness.readable;
+        self.writable |= readiness.writable;
+        if self.closed {
+            return;
+        }
+        self.touch();
+        if self.writable && !self.client_to_network.is_empty() {
+            self.process_send(selector);
+        }
+        if !self.closed && self.readable {
+            self.process_receive(selector);
+        }
+        if self.closed {
+            // on_ready is not called from the router, so the connection must remove itself
+            self.remove_from_router();
         }
     }
 
-    // return Err(err) with err.kind() == io::ErrorKind::WouldBlock on spurious event
-    fn process(&mut self, selector: &mut Selector, event: Event) -> io::Result<()> {
-        if !self.closed {
-            self.touch();
-            let ready = event.readiness();
-            if ready.is_readable() || ready.is_writable() {
-                if ready.is_writable() {
-                    self.process_send(selector)?;
+    fn process_send(&mut self, selector: &mut Selector) {
+        while !self.client_to_network.is_empty() {
+            match self.client_to_network.write_to(&mut self.socket) {
+                Ok(_) => (),
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    self.writable = false;
+                    return;
                 }
-                if !self.closed && ready.is_readable() {
-                    self.process_receive(selector)?;
+                Err(err) => {
+                    cx_error!(
+                        target: TAG,
+                        self.id,
+                        "Cannot write: [{:?}] {}",
+                        err.kind(),
+                        err
+                    );
+                    self.close(selector);
+                    return;
                 }
-                if !self.closed {
-                    self.update_interests(selector);
-                }
-            } else {
-                // error or hup
-                self.close(selector);
-            }
-            if self.closed {
-                // on_ready is not called from the router, so the connection must remove itself
-                self.remove_from_router();
             }
         }
-        Ok(())
     }
 
-    // return Err(err) with err.kind() == io::ErrorKind::WouldBlock on spurious event
-    fn process_send(&mut self, selector: &mut Selector) -> io::Result<()> {
-        match self.write() {
-            Ok(_) => (),
-            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                cx_debug!(target: TAG, self.id, "Spurious event, ignoring")
-            }
-            Err(err) => {
-                if err.kind() == io::ErrorKind::WouldBlock {
-                    // rethrow
-                    return Err(err);
-                }
-                cx_error!(
-                    target: TAG,
-                    self.id,
-                    "Cannot write: [{:?}] {}",
-                    err.kind(),
-                    err
-                );
-                self.close(selector);
-            }
-        }
-        Ok(())
-    }
-
-    // return Err(err) with err.kind() == io::ErrorKind::WouldBlock on spurious event
-    fn process_receive(&mut self, selector: &mut Selector) -> io::Result<()> {
+    fn process_receive(&mut self, selector: &mut Selector) {
         match self.read(selector) {
-            Ok(_) => (),
+            // read one datagram per iteration, so that the client can flush its buffer meanwhile
+            Ok(_) => selector.wake(self.token),
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => self.readable = false,
             Err(err) => {
-                if err.kind() == io::ErrorKind::WouldBlock {
-                    // rethrow
-                    return Err(err);
-                }
                 cx_error!(
                     target: TAG,
                     self.id,
@@ -184,7 +166,6 @@ impl UdpConnection {
                 self.close(selector);
             }
         }
-        Ok(())
     }
 
     fn read(&mut self, selector: &mut Selector) -> io::Result<()> {
@@ -215,27 +196,6 @@ impl UdpConnection {
         Ok(())
     }
 
-    fn write(&mut self) -> io::Result<()> {
-        self.client_to_network.write_to(&mut self.socket)?;
-        Ok(())
-    }
-
-    fn update_interests(&mut self, selector: &mut Selector) {
-        let ready = if self.client_to_network.is_empty() {
-            Ready::readable()
-        } else {
-            Ready::readable() | Ready::writable()
-        };
-        cx_debug!(target: TAG, self.id, "interests: {:?}", ready);
-        if self.interests != ready {
-            // interests must be changed
-            self.interests = ready;
-            selector
-                .reregister(&self.socket, self.token, ready, PollOpt::level())
-                .expect("Cannot register on poll");
-        }
-    }
-
     fn touch(&mut self) {
         self.idle_since = Instant::now();
     }
@@ -257,7 +217,9 @@ impl Connection for UdpConnection {
             .read_from(ipv4_packet.payload().expect("No payload"))
         {
             Ok(_) => {
-                self.update_interests(selector);
+                if self.writable {
+                    selector.wake(self.token);
+                }
             }
             Err(err) => cx_warn!(
                 target: TAG,
@@ -271,7 +233,7 @@ impl Connection for UdpConnection {
     fn close(&mut self, selector: &mut Selector) {
         cx_info!(target: TAG, self.id, "Close");
         self.closed = true;
-        if let Err(err) = selector.deregister(&self.socket, self.token) {
+        if let Err(err) = selector.deregister(&mut self.socket, self.token) {
             // do not panic, this can happen in mio
             // see <https://github.com/Genymobile/gnirehtet/issues/136>
             cx_warn!(
