@@ -497,6 +497,12 @@ impl TcpConnection {
                 expected_packet,
                 tcp_header.flags()
             );
+            if !tcp_header.is_rst() && self.tcb.state.is_connected() {
+                // RFC 793: an unacceptable segment must be answered with an ACK. Keepalive
+                // probes (sequence number one below the expected one) rely on it: without a
+                // reply, the client aborts the connection after a few probes.
+                self.reply_empty_packet_to_client(selector, client_channel, tcp_header::FLAG_ACK);
+            }
             return;
         }
 
