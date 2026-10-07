@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+# never cancel a release halfway through publishing it
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The Android app is unchanged since v2.5.1: the releases bundle the APK signed by upstream, so
+  # that it upgrades the installed app in place. Build and sign it here once app/ changes.
+  APK_RELEASE_URL: https://github.com/Genymobile/gnirehtet/releases/download/v2.5.1/gnirehtet-rust-linux64-v2.5.1.zip
+  APK_SHA256: c1ac2b869a48e3c836046aac5a168f3ade510288f3304a87ddb671315c564b9a
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+            binary: gnirehtet
+          - name: windows
+            os: windows-latest
+            binary: gnirehtet.exe
+    defaults:
+      run:
+        shell: bash
+        working-directory: relay-rust
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # no build cache: a release must not restore artifacts written by other workflows
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - run: cargo build --release --locked
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binary-${{ matrix.name }}
+          path: relay-rust/target/release/${{ matrix.binary }}
+          if-no-files-found: error
+
+  release:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release and upload its assets
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # cog reads the whole history and the tags to generate the changelog
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: cocogitto/cocogitto-action@52d0023b4396897f1815648e553db2ab8d782f3a # v4.2.0
+        with:
+          install-only: true
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: binary-*
+          path: bin
+
+      - name: Package
+        run: |
+          linux="gnirehtet-rust-linux64"
+          windows="gnirehtet-rust-win64"
+          mkdir -p "dist/$linux" "dist/$windows"
+
+          curl -fsSL -o upstream.zip "$APK_RELEASE_URL"
+          unzip -p upstream.zip gnirehtet-rust-linux64/gnirehtet.apk > gnirehtet.apk
+          echo "$APK_SHA256  gnirehtet.apk" | sha256sum -c -
+
+          # artifacts do not keep the executable bit
+          cp bin/binary-linux/gnirehtet "dist/$linux/"
+          chmod 755 "dist/$linux/gnirehtet"
+          strip "dist/$linux/gnirehtet"
+          cp gnirehtet.apk "dist/$linux/"
+          cp bin/binary-windows/gnirehtet.exe relay-rust/scripts/gnirehtet-run.cmd gnirehtet.apk \
+            "dist/$windows/"
+
+          cd dist
+          zip -r "$linux-$GITHUB_REF_NAME.zip" "$linux"
+          zip -r "$windows-$GITHUB_REF_NAME.zip" "$windows"
+          sha256sum -- *.zip > SHA256SUMS.txt
+
+      # legacy commits that do not follow Conventional Commits are reported on stderr and skipped
+      - run: cog changelog --at "$GITHUB_REF_NAME" > notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md \
+            dist/*.zip dist/SHA256SUMS.txt
