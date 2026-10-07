@@ -23,58 +23,14 @@ use super::transport_header::{TransportHeader, TransportHeaderData, TransportHea
 
 /// Convert from level 5 to level 3 by appending correct IP and transport headers.
 ///
-/// Data packets and empty packets (ACK, FIN, RST...) are built in separate buffers. A data packet
-/// may stay pending until the client buffer has room for it, and forging an empty packet in the
-/// meantime must not overwrite its headers.
+/// The returned packet points to the packetizer buffer: it must be used (or copied) before the
+/// next packet is built.
 pub struct Packetizer {
-    data: Frame,
-    empty: Frame,
+    buffer: Box<[u8]>,
     transport_index: usize,
     payload_index: usize,
-}
-
-struct Frame {
-    buffer: Box<[u8]>,
     ipv4_header_data: Ipv4HeaderData,
     transport_header_data: TransportHeaderData,
-}
-
-impl Frame {
-    fn ipv4_header_mut(&mut self, transport_index: usize) -> Ipv4HeaderMut {
-        let raw = &mut self.buffer[..transport_index];
-        self.ipv4_header_data.bind_mut(raw)
-    }
-
-    fn transport_header_mut(
-        &mut self,
-        transport_index: usize,
-        payload_index: usize,
-    ) -> TransportHeaderMut {
-        let raw = &mut self.buffer[transport_index..payload_index];
-        self.transport_header_data.bind_mut(raw)
-    }
-
-    fn build(
-        &mut self,
-        transport_index: usize,
-        payload_index: usize,
-        payload_length: u16,
-    ) -> Ipv4Packet {
-        let total_length = payload_index as u16 + payload_length;
-
-        self.ipv4_header_mut(transport_index)
-            .set_total_length(total_length);
-        self.transport_header_mut(transport_index, payload_index)
-            .set_payload_length(payload_length);
-
-        let mut ipv4_packet = Ipv4Packet::new(
-            &mut self.buffer[..total_length as usize],
-            self.ipv4_header_data.clone(),
-            self.transport_header_data.clone(),
-        );
-        ipv4_packet.compute_checksums();
-        ipv4_packet
-    }
 }
 
 impl Packetizer {
@@ -104,36 +60,22 @@ impl Packetizer {
             transport_header.swap_source_and_destination();
         }
 
-        let empty = Frame {
-            buffer: buffer[..payload_index].into(),
-            ipv4_header_data: ipv4_header_data.clone(),
-            transport_header_data: transport_header_data.clone(),
-        };
-        let data = Frame {
-            buffer,
-            ipv4_header_data,
-            transport_header_data,
-        };
-
         Self {
-            data,
-            empty,
+            buffer,
             transport_index,
             payload_index,
+            ipv4_header_data,
+            transport_header_data,
         }
     }
 
-    pub fn packetize_empty_payload(&mut self) -> Ipv4Packet {
-        self.empty
-            .build(self.transport_index, self.payload_index, 0)
+    pub fn packetize_empty_payload(&mut self) -> Ipv4Packet<'_> {
+        self.build(0)
     }
 
-    pub fn packetize<R: DatagramReceiver>(&mut self, source: &mut R) -> io::Result<Ipv4Packet> {
-        let r = source.recv(&mut self.data.buffer[self.payload_index..])?;
-        let ipv4_packet = self
-            .data
-            .build(self.transport_index, self.payload_index, r as u16);
-        Ok(ipv4_packet)
+    pub fn packetize<R: DatagramReceiver>(&mut self, source: &mut R) -> io::Result<Ipv4Packet<'_>> {
+        let r = source.recv(&mut self.buffer[self.payload_index..])?;
+        Ok(self.build(r as u16))
     }
 
     /// Packetize from stream (`Read`) source.
@@ -145,38 +87,41 @@ impl Packetizer {
         &mut self,
         source: &mut R,
         max_chunk_size: Option<usize>,
-    ) -> io::Result<Option<Ipv4Packet>> {
+    ) -> io::Result<Option<Ipv4Packet<'_>>> {
         let mut adapter = ReadAdapter::new(source, max_chunk_size);
-        let r = adapter.recv(&mut self.data.buffer[self.payload_index..])?;
+        let r = adapter.recv(&mut self.buffer[self.payload_index..])?;
         let option = if r > 0 {
-            let ipv4_packet = self
-                .data
-                .build(self.transport_index, self.payload_index, r as u16);
-            Some(ipv4_packet)
+            Some(self.build(r as u16))
         } else {
             None
         };
         Ok(option)
     }
 
-    /// Transport header of the next data packet
-    pub fn transport_header_mut(&mut self) -> TransportHeaderMut {
-        self.data
-            .transport_header_mut(self.transport_index, self.payload_index)
+    pub fn transport_header_mut(&mut self) -> TransportHeaderMut<'_> {
+        let raw = &mut self.buffer[self.transport_index..self.payload_index];
+        self.transport_header_data.bind_mut(raw)
     }
 
-    /// Transport header of the next empty packet
-    pub fn empty_transport_header_mut(&mut self) -> TransportHeaderMut {
-        self.empty
-            .transport_header_mut(self.transport_index, self.payload_index)
+    fn ipv4_header_mut(&mut self) -> Ipv4HeaderMut<'_> {
+        let raw = &mut self.buffer[..self.transport_index];
+        self.ipv4_header_data.bind_mut(raw)
     }
 
-    pub fn inflate(&mut self, packet_length: u16) -> Ipv4Packet {
-        Ipv4Packet::new(
-            &mut self.data.buffer[..packet_length as usize],
-            self.data.ipv4_header_data.clone(),
-            self.data.transport_header_data.clone(),
-        )
+    fn build(&mut self, payload_length: u16) -> Ipv4Packet<'_> {
+        let total_length = self.payload_index as u16 + payload_length;
+
+        self.ipv4_header_mut().set_total_length(total_length);
+        self.transport_header_mut()
+            .set_payload_length(payload_length);
+
+        let mut ipv4_packet = Ipv4Packet::new(
+            &mut self.buffer[..total_length as usize],
+            self.ipv4_header_data.clone(),
+            self.transport_header_data.clone(),
+        );
+        ipv4_packet.compute_checksums();
+        ipv4_packet
     }
 }
 
@@ -222,47 +167,6 @@ mod tests {
 
         let packet = packetizer.packetize(&mut mock).unwrap();
         assert_eq!(36, packet.ipv4_header_data().total_length());
-        assert_eq!(data, &packet.raw()[28..36]);
-    }
-
-    #[test]
-    fn last_packet() {
-        let raw = &mut create_packet()[..];
-        let reference_packet = Ipv4Packet::parse(raw);
-
-        let data = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
-        let mut mock = MockDatagramSocket::from_data(&data);
-
-        let ipv4_header = reference_packet.ipv4_header();
-        let transport_header = reference_packet.transport_header().unwrap();
-        let mut packetizer = Packetizer::new(&ipv4_header, &transport_header);
-
-        let packet_length = packetizer.packetize(&mut mock).unwrap().length();
-        let packet = packetizer.inflate(packet_length);
-        assert_eq!(36, packet.ipv4_header_data().total_length());
-        assert_eq!(data, &packet.raw()[28..36]);
-    }
-
-    #[test]
-    fn empty_packet_preserves_pending_packet() {
-        let raw = &mut create_packet()[..];
-        let reference_packet = Ipv4Packet::parse(raw);
-
-        let data = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
-        let mut mock = MockDatagramSocket::from_data(&data);
-
-        let ipv4_header = reference_packet.ipv4_header();
-        let transport_header = reference_packet.transport_header().unwrap();
-        let mut packetizer = Packetizer::new(&ipv4_header, &transport_header);
-
-        let packet_length = packetizer.packetize(&mut mock).unwrap().length();
-        // forged while the data packet is still pending
-        assert_eq!(28, packetizer.packetize_empty_payload().length());
-
-        let packet = packetizer.inflate(packet_length);
-        assert_eq!(36, packet.ipv4_header_data().total_length());
-        // the total length stored in the raw header is what the client parses
-        assert_eq!([0, 36], packet.raw()[2..4]);
         assert_eq!(data, &packet.raw()[28..36]);
     }
 

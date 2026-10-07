@@ -15,111 +15,39 @@
  */
 
 use log::*;
-use mio::Interest;
-use mio::net::TcpListener;
-use std::cell::RefCell;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::ptr;
-use std::rc::{Rc, Weak};
+use std::time::Duration;
+use tokio::net::TcpListener;
+use tokio::time;
 
-use super::client::Client;
-use super::selector::{Readiness, Selector};
+use super::client;
 
 const TAG: &str = "TunnelServer";
 
-pub struct TunnelServer {
-    self_weak: Weak<RefCell<TunnelServer>>,
-    clients: Vec<Rc<RefCell<Client>>>,
-    tcp_listener: TcpListener,
-    next_client_id: u32,
+pub async fn bind(port: u16) -> io::Result<TcpListener> {
+    TcpListener::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)).await
 }
 
-impl TunnelServer {
-    pub fn create(port: u16, selector: &mut Selector) -> io::Result<Rc<RefCell<Self>>> {
-        let tcp_listener = Self::start_socket(port)?;
-        let rc = Rc::new(RefCell::new(Self {
-            self_weak: Weak::new(),
-            clients: Vec::new(),
-            tcp_listener,
-            next_client_id: 0,
-        }));
-
-        // keep a shared reference to this
-        rc.borrow_mut().self_weak = Rc::downgrade(&rc);
-
-        let rc2 = rc.clone();
-        // must anotate selector type: https://stackoverflow.com/a/44004103/1987178
-        let handler = move |selector: &mut Selector, readiness| {
-            rc2.borrow_mut().on_ready(selector, readiness)
-        };
-        selector.register(
-            &mut rc.borrow_mut().tcp_listener,
-            handler,
-            Interest::READABLE,
-        )?;
-        Ok(rc)
-    }
-
-    fn start_socket(port: u16) -> io::Result<TcpListener> {
-        let localhost = Ipv4Addr::new(127, 0, 0, 1).into();
-        let addr = SocketAddr::new(localhost, port);
-        let server = TcpListener::bind(addr)?;
-        Ok(server)
-    }
-
-    fn on_ready(&mut self, selector: &mut Selector, _: Readiness) {
-        // notifications are edge-triggered: accept until there is no pending connection left
-        loop {
-            match self.accept_client(selector) {
-                Ok(_) => debug!(target: TAG, "New client accepted"),
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
-                Err(err) => {
-                    error!(target: TAG, "Cannot accept client: {}", err);
-                    break;
-                }
+/// Accept clients and relay each of them in its own task
+pub async fn serve(listener: TcpListener) {
+    let mut next_client_id = 0u32;
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                let id = next_client_id;
+                next_client_id += 1;
+                info!(target: TAG, "Client #{} connected", id);
+                tokio::spawn(async move {
+                    client::run(id, stream).await;
+                    info!(target: TAG, "Client #{} disconnected", id);
+                });
             }
-        }
-    }
-
-    fn accept_client(&mut self, selector: &mut Selector) -> io::Result<()> {
-        let (stream, _) = self.tcp_listener.accept()?;
-        let client_id = self.next_client_id;
-        self.next_client_id += 1;
-        let weak = self.self_weak.clone();
-        let on_client_closed = Box::new(move |client: &Client| {
-            if let Some(rc) = weak.upgrade() {
-                let mut tunnel_server = rc.borrow_mut();
-                tunnel_server.remove_client(client);
-            } else {
-                warn!(
-                    target: TAG,
-                    "on_client_closed called but no tunnel_server available"
-                );
+            Err(err) => {
+                error!(target: TAG, "Cannot accept client: {}", err);
+                // do not spin if the error persists (e.g. too many open files)
+                time::sleep(Duration::from_millis(100)).await;
             }
-        });
-        let client = Client::create(client_id, selector, stream, on_client_closed)?;
-        self.clients.push(client);
-        info!(target: TAG, "Client #{} connected", client_id);
-        Ok(())
-    }
-
-    fn remove_client(&mut self, client: &Client) {
-        info!(target: TAG, "Client #{} disconnected", client.id());
-        let index = self
-            .clients
-            .iter()
-            .position(|item| {
-                // compare pointers to find the client to remove
-                ptr::eq(client, item.as_ptr())
-            })
-            .expect("Trying to remove an unknown client");
-        self.clients.swap_remove(index);
-    }
-
-    pub fn clean_up(&mut self, selector: &mut Selector) {
-        for client in &self.clients {
-            client.borrow_mut().clean_expired_connections(selector);
         }
     }
 }

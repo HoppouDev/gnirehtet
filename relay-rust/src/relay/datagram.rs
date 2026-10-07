@@ -14,33 +14,48 @@
  * limitations under the License.
  */
 
-use mio::net::UdpSocket;
 use std::cmp;
 use std::io;
-
-pub const MAX_DATAGRAM_LENGTH: usize = 1 << 16;
-
-pub trait DatagramSender {
-    fn send(&mut self, buf: &[u8]) -> io::Result<usize>;
-}
+use tokio::net::tcp::OwnedReadHalf;
+use tokio::net::{TcpStream, UdpSocket};
 
 pub trait DatagramReceiver {
     fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize>;
 }
 
-// Expose UdpSocket as DatagramSender
-impl DatagramSender for UdpSocket {
-    fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // call the Self implementation
-        (self as &Self).send(buf)
+// Expose UdpSocket as DatagramReceiver (non-blocking)
+impl DatagramReceiver for &UdpSocket {
+    fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.try_recv(buf)
     }
 }
 
-// Expose UdpSocket as DatagramReceiver
-impl DatagramReceiver for UdpSocket {
-    fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // call the Self implementation
-        (self as &Self).recv(buf)
+/// Non-blocking `Read`/`Write` over a tokio stream, to be used once it is readable/writable
+///
+/// Operations return `WouldBlock` if the stream is not ready.
+pub struct TryRead<'a, T>(pub &'a T);
+
+pub struct TryWrite<'a>(pub &'a TcpStream);
+
+impl io::Write for TryWrite<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.try_write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl io::Read for TryRead<'_, TcpStream> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.try_read(buf)
+    }
+}
+
+impl io::Read for TryRead<'_, OwnedReadHalf> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.try_read(buf)
     }
 }
 
@@ -83,6 +98,8 @@ where
 pub mod tests {
     use super::*;
 
+    const MAX_DATAGRAM_LENGTH: usize = 1 << 16;
+
     // Mock datagram socket to be used in other tests
     pub struct MockDatagramSocket {
         buf: [u8; MAX_DATAGRAM_LENGTH],
@@ -99,21 +116,9 @@ pub mod tests {
 
         pub fn from_data(data: &[u8]) -> Self {
             let mut mock = MockDatagramSocket::new();
-            mock.send(data).unwrap();
+            mock.buf[..data.len()].copy_from_slice(data);
+            mock.len = data.len();
             mock
-        }
-
-        pub fn data(&self) -> &[u8] {
-            &self.buf[..self.len]
-        }
-    }
-
-    impl DatagramSender for MockDatagramSocket {
-        fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
-            let len = cmp::min(self.buf.len(), buf.len());
-            self.buf[..len].copy_from_slice(&buf[..len]);
-            self.len = len;
-            Ok(len)
         }
     }
 
@@ -123,24 +128,6 @@ pub mod tests {
             buf[..len].copy_from_slice(&self.buf[..len]);
             Ok(len)
         }
-    }
-
-    #[test]
-    fn mock_send() {
-        let mut mock = MockDatagramSocket::new();
-        let data = [1, 2, 3, 4, 5];
-        let sent = mock.send(&data).unwrap();
-        assert_eq!(5, sent);
-        assert_eq!([1, 2, 3, 4, 5], mock.data());
-    }
-
-    #[test]
-    fn mock_recv() {
-        let mut mock = MockDatagramSocket::from_data(&[1, 2, 3, 4, 5]);
-        let mut buf = [0u8; 10];
-        let recved = mock.recv(&mut buf).unwrap();
-        assert_eq!(5, recved);
-        assert_eq!([1, 2, 3, 4, 5], &buf[..5]);
     }
 
     #[test]

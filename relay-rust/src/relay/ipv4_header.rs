@@ -37,7 +37,7 @@ pub struct Ipv4HeaderData {
     destination: u32,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Protocol {
     Tcp,
     Udp,

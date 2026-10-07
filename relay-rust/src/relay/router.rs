@@ -15,72 +15,45 @@
  */
 
 use log::*;
-use std::cell::RefCell;
-use std::io;
-use std::rc::{Rc, Weak};
+use std::collections::HashMap;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 
 use super::binary;
-use super::client::{Client, ClientChannel};
-use super::connection::{Connection, ConnectionId};
+use super::client::ClientSender;
+use super::connection::ConnectionId;
 use super::ipv4_header::Protocol;
 use super::ipv4_packet::Ipv4Packet;
-use super::selector::Selector;
 use super::tcp_connection::TcpConnection;
 use super::udp_connection::UdpConnection;
 
 const TAG: &str = "Router";
 
+/// Number of packets from the client queued for a connection
+///
+/// When the queue is full, packets are dropped (TCP retransmits them).
+///
+/// A single chunk read from the client may contain more than a hundred packets for the same
+/// connection (the client sends 536-byte TCP segments).
+const QUEUE_CAPACITY: usize = 512;
+
+/// Dispatch the packets from the client to their connection
 pub struct Router {
-    client: Weak<RefCell<Client>>,
-    // there are typically only few connections per client, HashMap would be less efficient
-    connections: Vec<Rc<RefCell<dyn Connection>>>,
+    client: ClientSender,
+    // each connection runs in its own task, until its queue is closed
+    connections: HashMap<ConnectionId, mpsc::Sender<Vec<u8>>>,
 }
 
 impl Router {
-    pub fn new() -> Self {
+    pub fn new(client: ClientSender) -> Self {
         Self {
-            client: Weak::new(),
-            connections: Vec::new(),
+            client,
+            connections: HashMap::new(),
         }
     }
 
-    // expose client initialization after construction to break cyclic initialization dependencies
-    pub fn set_client(&mut self, client: Weak<RefCell<Client>>) {
-        self.client = client;
-    }
-
-    pub fn send_to_network(
-        &mut self,
-        selector: &mut Selector,
-        client_channel: &mut ClientChannel,
-        ipv4_packet: &Ipv4Packet,
-    ) {
-        if ipv4_packet.is_valid() {
-            match self.connection(selector, ipv4_packet) {
-                Ok(index) => {
-                    let closed = {
-                        let connection_ref = &self.connections[index];
-                        let mut connection = connection_ref.borrow_mut();
-                        connection.send_to_network(selector, client_channel, ipv4_packet);
-                        if connection.is_closed() {
-                            debug!(
-                                target: TAG,
-                                "Removing connection from router: {}",
-                                connection.id()
-                            );
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    if closed {
-                        // the connection is closed, remove it
-                        self.connections.swap_remove(index);
-                    }
-                }
-                Err(err) => error!(target: TAG, "Cannot create route, dropping packet: {}", err),
-            }
-        } else {
+    pub fn send_to_network(&mut self, ipv4_packet: &Ipv4Packet) {
+        if !ipv4_packet.is_valid() {
             warn!(target: TAG, "Dropping invalid packet");
             if log_enabled!(target: TAG, Level::Trace) {
                 trace!(
@@ -89,110 +62,47 @@ impl Router {
                     binary::build_packet_string(ipv4_packet.raw())
                 );
             }
+            return;
         }
-    }
 
-    fn connection(
-        &mut self,
-        selector: &mut Selector,
-        ipv4_packet: &Ipv4Packet,
-    ) -> io::Result<usize> {
         let (ipv4_header_data, transport_header_data) = ipv4_packet.headers_data();
         let transport_header_data = transport_header_data.expect("No transport");
         let id = ConnectionId::from_headers(ipv4_header_data, transport_header_data);
-        let index = match self.find_index(&id) {
-            Some(index) => index,
-            None => {
-                let connection =
-                    Self::create_connection(selector, id, self.client.clone(), ipv4_packet)?;
-                let index = self.connections.len();
-                self.connections.push(connection);
-                index
-            }
-        };
-        Ok(index)
-    }
 
-    fn create_connection(
-        selector: &mut Selector,
-        id: ConnectionId,
-        client: Weak<RefCell<Client>>,
-        ipv4_packet: &Ipv4Packet,
-    ) -> io::Result<Rc<RefCell<dyn Connection>>> {
-        let (ipv4_header, transport_header) = ipv4_packet.headers();
-        let transport_header = transport_header.expect("No transport");
-        match id.protocol() {
-            Protocol::Tcp => Ok(TcpConnection::create(
-                selector,
-                id,
-                client,
-                ipv4_header,
-                transport_header,
-            )?),
-            Protocol::Udp => Ok(UdpConnection::create(
-                selector,
-                id,
-                client,
-                ipv4_header,
-                transport_header,
-            )?),
-            p => Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("Unsupported protocol: {:?}", p),
-            )),
-        }
-    }
-
-    fn find_index(&self, id: &ConnectionId) -> Option<usize> {
-        self.connections
-            .iter()
-            .position(|connection| connection.borrow().id() == id)
-    }
-
-    pub fn remove(&mut self, connection: &dyn Connection) {
-        let index = self
-            .connections
-            .iter()
-            .position(|item| {
-                // compare (thin) pointers to find the connection to remove
-                binary::ptr_data_eq(connection, item.as_ptr())
-            })
-            .expect("Removing an unknown connection");
-        debug!(
-            target: TAG,
-            "Self-removing connection from router: {}",
-            connection.id()
-        );
-        self.connections.swap_remove(index);
-    }
-
-    pub fn clear(&mut self, selector: &mut Selector) {
-        for connection in &mut self.connections {
-            connection.borrow_mut().close(selector);
-        }
-        self.connections.clear();
-    }
-
-    pub fn clean_expired_connections(&mut self, selector: &mut Selector) {
-        // remove the last items first, otherwise i might not be less than len() on swap_remove(i)
-        for i in (0..self.connections.len()).rev() {
-            let expired = {
-                let mut connection = self.connections[i].borrow_mut();
-                if connection.is_expired() {
-                    debug!(
-                        target: TAG,
-                        "Removing expired connection from router: {}",
-                        connection.id()
-                    );
-                    connection.close(selector);
-                    true
-                } else {
-                    false
+        if let Some(connection) = self.connections.get(&id) {
+            match connection.try_send(ipv4_packet.raw().to_vec()) {
+                Ok(()) => return,
+                Err(TrySendError::Full(_)) => {
+                    cx_warn!(target: TAG, id, "Connection busy, dropping packet");
+                    return;
                 }
-            };
-            if expired {
-                self.connections.swap_remove(i);
+                // the connection terminated, the packet belongs to a new one
+                Err(TrySendError::Closed(_)) => (),
             }
         }
+
+        // forget the terminated connections
+        self.connections
+            .retain(|_, connection| !connection.is_closed());
+
+        let (sender, receiver) = mpsc::channel(QUEUE_CAPACITY);
+        let packet = ipv4_packet.raw().to_vec();
+        let client = self.client.clone();
+        match id.protocol() {
+            Protocol::Tcp => {
+                tokio::spawn(TcpConnection::run(id.clone(), client, packet, receiver));
+            }
+            Protocol::Udp => {
+                tokio::spawn(UdpConnection::run(id.clone(), client, packet, receiver));
+            }
+            protocol => {
+                error!(
+                    target: TAG,
+                    "Cannot create route, dropping packet: Unsupported protocol: {:?}", protocol
+                );
+                return;
+            }
+        }
+        self.connections.insert(id, sender);
     }
 }
