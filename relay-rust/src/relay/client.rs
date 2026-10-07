@@ -225,6 +225,10 @@ impl Client {
             match self.write() {
                 Ok(_) => self.process_pending(selector),
                 Err(err) => {
+                    if err.kind() == io::ErrorKind::WouldBlock {
+                        // rethrow
+                        return Err(err);
+                    }
                     error!(target: TAG, "Cannot write: [{:?}] {}", err.kind(), err);
                     self.close(selector);
                 }
