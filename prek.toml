@@ -8,19 +8,19 @@ repo = "local"
 
 [[repos.hooks]]
 id = "cargo-fmt"
-name = "cargo fmt (relay-rust)"
+name = "cargo fmt (relay)"
 language = "system"
-entry = "cargo fmt --manifest-path relay-rust/Cargo.toml --all -- --check"
-files = "^relay-rust/.*\\.rs$"
+entry = "cargo fmt --manifest-path relay/Cargo.toml --all -- --check"
+files = "^relay/.*\\.rs$"
 pass_filenames = false
 stages = ["pre-commit"]
 
 [[repos.hooks]]
 id = "cargo-clippy"
-name = "cargo clippy (relay-rust)"
+name = "cargo clippy (relay)"
 language = "system"
-entry = "cargo clippy --manifest-path relay-rust/Cargo.toml --all-targets -- -D warnings"
-files = "^relay-rust/(.*\\.rs|Cargo\\.(toml|lock))$"
+entry = "cargo clippy --manifest-path relay/Cargo.toml --all-targets -- -D warnings"
+files = "^relay/(.*\\.rs|Cargo\\.(toml|lock))$"
 pass_filenames = false
 stages = ["pre-commit"]
 

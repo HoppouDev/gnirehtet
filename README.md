@@ -17,30 +17,9 @@ _**This project is not actively maintained anymore, only major blockers (like
 build issues) are fixed. It should still work, though.**_
 
 
-## Flavors
-
-Two implementations of _Gnirehtet_ are available:
- - one in **Java**;
- - one in **Rust**.
-
-
-### Which one to choose?
-
-Use the **Rust** implementation. The native binary consumes less CPU and memory,
-and does not require a _Java_ runtime environment.
-
-The relay server of _Gnirehtet_ was initially only implemented in Java. As a
-benefit, the same "binary" runs on every platform having _Java 8_ runtime
-installed. It is still maintained to provide a working alternative in case of
-problems with the Rust version.
-
-
 ## Requirements
 
 The Android application requires at least API 21 (Android 5.0).
-
-For the _Java_ version only, _Java 8_ (JRE) is required on your computer. On
-Debian-based distros, install the package `openjdk-8-jre`.
 
 ### adb
 
@@ -72,7 +51,7 @@ Make sure you [enabled adb debugging][enable-adb] on your device(s).
 ### Homebrew
 
 If you use [Homebrew](https://brew.sh/), getting up and running is very quick.
-To install the Rust version:
+To install it:
 
 ```
 brew install gnirehtet
@@ -80,12 +59,9 @@ brew install gnirehtet
 
 ### Download
 
-Download the [latest release][latest] in the flavor you want.
+Download the [latest release][latest].
 
 [latest]: https://github.com/Genymobile/gnirehtet/releases/latest
-
-
-#### Rust
 
  - **Linux:** [`gnirehtet-rust-linux64-v2.5.1.zip`][direct-rust-linux64]  
    (SHA-256: _dee55499ca4fef00ce2559c767d2d8130163736d43fdbce753e923e75309c275_)
@@ -108,21 +84,6 @@ The Linux and MacOS archives contain:
 The Windows archive contains:
  - `gnirehtet.apk`
  - `gnirehtet.exe`
- - `gnirehtet-run.cmd`
-
-
-#### Java
-
- - **All platforms:** [`gnirehtet-java-v2.5.1.zip`][direct-java]  
-   (SHA-256: _816748078fa6a304600a294a13338a06ac778bcc0e57b62d88328c7968ad2d3a_)
-
-[direct-java]: https://github.com/Genymobile/gnirehtet/releases/download/v2.5.1/gnirehtet-java-v2.5.1.zip
-
-Then extract it. The archive contains:
- - `gnirehtet.apk`
- - `gnirehtet.jar`
- - `gnirehtet`
- - `gnirehtet.cmd`
  - `gnirehtet-run.cmd`
 
 
