@@ -1,0 +1,12 @@
+# Conventional Commits tooling, see https://docs.cocogitto.io/reference/config.html
+tag_prefix = "v"
+from_latest_tag = true
+ignore_merge_commits = true
+branch_whitelist = ["master"]
+
+[changelog]
+path = "CHANGELOG.md"
+template = "remote"
+remote = "github.com"
+owner = "HoppouDev"
+repository = "gnirehtet"

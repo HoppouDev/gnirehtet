@@ -1,0 +1,32 @@
+# Git hooks run by prek, see https://prek.j178.dev
+# Install them with `prek install` (requires cargo and cocogitto on PATH).
+minimum_prek_version = "0.5.2"
+default_install_hook_types = ["pre-commit", "commit-msg"]
+
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "cargo-fmt"
+name = "cargo fmt (relay-rust)"
+language = "system"
+entry = "cargo fmt --manifest-path relay-rust/Cargo.toml --all -- --check"
+files = "^relay-rust/.*\\.rs$"
+pass_filenames = false
+stages = ["pre-commit"]
+
+[[repos.hooks]]
+id = "cargo-clippy"
+name = "cargo clippy (relay-rust)"
+language = "system"
+entry = "cargo clippy --manifest-path relay-rust/Cargo.toml --all-targets -- -D warnings"
+files = "^relay-rust/(.*\\.rs|Cargo\\.(toml|lock))$"
+pass_filenames = false
+stages = ["pre-commit"]
+
+[[repos.hooks]]
+id = "cog-verify"
+name = "conventional commit message"
+language = "system"
+entry = "cog verify --file"
+stages = ["commit-msg"]

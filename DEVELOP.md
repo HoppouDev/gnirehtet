@@ -86,6 +86,33 @@ server. You can also execute any _gradle_ tasks, and run the tests with visual
 results.
 
 
+### Git hooks
+
+Commits are checked by Git hooks managed by [prek]:
+ - the Rust relay must be formatted (`cargo fmt`) and free of [clippy]
+   warnings
+ - commit messages must follow [Conventional Commits], checked by
+   [cocogitto]
+
+Install `prek` and `cocogitto` (for example `scoop install prek cocogitto` on
+Windows, or `cargo install prek cocogitto`), then enable the hooks once in your
+clone:
+
+    prek install
+
+To run the format and lint checks on the whole repository:
+
+    prek run --all-files
+
+The current version and the next one can be printed with `cog get-version` and
+`cog bump --auto --dry-run`.
+
+[prek]: https://prek.j178.dev
+[clippy]: https://doc.rust-lang.org/clippy/
+[Conventional Commits]: https://www.conventionalcommits.org
+[cocogitto]: https://docs.cocogitto.io
+
+
 ## Overview
 
 The client registers itself as a [VPN], in order to intercept the whole device
