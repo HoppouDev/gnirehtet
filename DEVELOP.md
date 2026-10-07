@@ -174,18 +174,19 @@ The relay server comes in two flavors:
  - the **Rust** version is a _Rust_ project located in
    [`relay-rust/`](relay-rust/).
 
-It is implemented using [asynchronous I/O] (through [Java NIO] and [Rust mio]).
+It is implemented using [asynchronous I/O] (through [Java NIO] and [Rust tokio]).
 As a consequence, it is essentially monothreaded, so there is no need for
 synchronization to handle packets.
 
 [asynchronous I/O]: https://en.wikipedia.org/wiki/Asynchronous_I/O
 [Java NIO]: https://en.wikipedia.org/wiki/New_I/O_%28Java%29
-[Rust mio]: https://docs.rs/mio/0.6.10/mio/
+[Rust tokio]: https://docs.rs/tokio/1/tokio/
 
 
-### Selector
+### Event loop
 
-There are different _socket channels_ registered to a unique _selector_:
+In **Java**, there are different _socket channels_ registered to a unique
+_selector_:
  - one for the server socket, listening on port 31416;
  - one for each _client_, accepted by the server socket;
  - one for each _TCP connection_ to the network;
@@ -193,9 +194,9 @@ There are different _socket channels_ registered to a unique _selector_:
 
 Initially, only the server socket _channel_ is registered.
 
-In **Java**, the _channels_ ([`SelectableChannel`][nio/SelectableChannel]) are
-registered to the _selector_ ([`Selector`][nio/Selector]) defined in
-[`Relay`][java/Relay], with their [`SelectionHandler`][java/SelectionHandler] as
+The _channels_ ([`SelectableChannel`][nio/SelectableChannel]) are registered to
+the _selector_ ([`Selector`][nio/Selector]) defined in [`Relay`][java/Relay],
+with their [`SelectionHandler`][java/SelectionHandler] as
 [attachment][nio/attachment] (for better decoupling). A [`Client`][java/Client]
 is created for every accepted _client_.
 
@@ -206,22 +207,20 @@ is created for every accepted _client_.
 [nio/attachment]: https://docs.oracle.com/javase/8/docs/api/java/nio/channels/SelectionKey.html#attachment--
 [java/Client]: relay-java/src/main/java/com/genymobile/gnirehtet/relay/Client.java
 
-In **Rust**, our own [`Selector`][rust/selector] class wraps the
-[`Poll`][mio/Poll] from _mio_ to expose an API accepting event handlers instead
-of low-level [tokens][mio/Token]. The _selector_ instance is created in
-[`Relay`][rust/relay]. The _channels_ are called _"handles"_ in _mio_; they are
-simply the socket instances themselves ([`TcpListener`][mio/TcpListener],
-[`TcpStream`][mio/TcpStream] and [`UdpSocket`][mio/UdpSocket]). A
-[`Client`][rust/client] is created for every accepted _client_.
+In **Rust**, there is no selector. [`Relay`][rust/relay] creates a
+single-threaded _tokio_ runtime, on which each socket is handled by its own
+asynchronous task:
+ - the [_tunnel server_][rust/tunnel-server] accepts the clients on port 31416
+   and spawns a task for every accepted [_client_][rust/client]
+ - each _TCP connection_ and each _UDP connection_ to the network runs in its
+   own task
 
-[mio/Poll]: https://docs.rs/mio/0.6.10/mio/struct.Poll.html
-[mio/Token]: https://docs.rs/mio/0.6.10/mio/struct.Token.html
-[mio/TcpListener]: https://docs.rs/mio/0.6.10/mio/net/struct.TcpListener.html
-[mio/TcpStream]: https://docs.rs/mio/0.6.10/mio/net/struct.TcpStream.html
-[mio/UdpSocket]: https://docs.rs/mio/0.6.10/mio/net/struct.UdpSocket.html
-[rust/selector]: relay-rust/src/relay/selector.rs
+Tasks exchange packets through bounded channels ([`mpsc`][tokio/mpsc]).
+
 [rust/relay]: relay-rust/src/relay/relay.rs
+[rust/tunnel-server]: relay-rust/src/relay/tunnel\_server.rs
 [rust/client]: relay-rust/src/relay/client.rs
+[tokio/mpsc]: https://docs.rs/tokio/1/tokio/sync/mpsc/index.html
 
 ![archi](assets/archi.png)
 
@@ -248,6 +247,10 @@ structured view to read and write packet data, which is physically stored in the
 buffers (the little squares on the schema). Since we handle one packet at a time
 with asynchronous I/O, there is no need to copy or synchronize access to the
 packets data: the packets just point to the buffer where they are stored.
+
+In **Rust**, a packet is copied into a new buffer when it is passed from one
+task to another (between the client and a connection). The packets for the
+device are copied once more when the client batches them into a single write.
 
 [java/IPv4Packet]: relay-java/src/main/java/com/genymobile/gnirehtet/relay/IPv4Packet.java
 [rust/ipv4-packet]: relay-rust/src/relay/ipv4\_packet.rs
@@ -313,6 +316,10 @@ These identifiers are stored in a _connection id_
 ([`ConnectionId`][java/ConnectionId] | [`ConnectionId`][rust/connection]),
 used as a key to find or create the associated _connection_.
 
+In **Rust**, the router keeps the sending side of the channel of each
+_connection_. When this channel is full, the packet is dropped (see below why
+this is safe).
+
 [java/Router]: relay-java/src/main/java/com/genymobile/gnirehtet/relay/Router.java
 [java/ConnectionId]: relay-java/src/main/java/com/genymobile/gnirehtet/relay/ConnectionId.java
 [rust/Router]: relay-rust/src/relay/router.rs
@@ -321,12 +328,18 @@ used as a key to find or create the associated _connection_.
 
 ### Connections
 
-A _connection_ ([`Connection`][java/Connection] |
-[`Connection`][rust/connection]) is either a _TCP connection_
-([`TCPConnection`][java/TCPConnection] | [`TcpConnection`][rust/tcp-connection])
-or a _UDP connection_ ([`UDPConnection`][java/UDPConnection] |
-[`UdpConnection`][rust/udp-connection]) to the requested destination. It
-registers its own _channel_ to the _selector_.
+A _connection_ ([`Connection`][java/Connection] in Java) is either a _TCP
+connection_ ([`TCPConnection`][java/TCPConnection] |
+[`TcpConnection`][rust/tcp-connection]) or a _UDP connection_
+([`UDPConnection`][java/UDPConnection] |
+[`UdpConnection`][rust/udp-connection]) to the requested destination. In
+**Java**, it registers its own _channel_ to the _selector_. In **Rust**, it runs
+in its own task, which receives the packets of the device from the router and
+sends its packets to the client channel, in order, through an
+[_outbox_][rust/outbox]: the packets which do not fit in the client channel
+wait there until it has room.
+
+[rust/outbox]: relay-rust/src/relay/outbox.rs
 
 [java/Connection]: relay-java/src/main/java/com/genymobile/gnirehtet/relay/Connection.java
 [java/TCPConnection]: relay-java/src/main/java/com/genymobile/gnirehtet/relay/TCPConnection.java
@@ -364,8 +377,10 @@ to the other side, without any splitting or merging (datagram boundaries must be
 preserved for UDP).
 
 Since UDP is not a connected protocol, a UDP connection is never "closed".
-Therefore, the _selector_ wakes up once per minute (using a timeout) to clean
-expired (in practice, unused for more than 2 minutes) UDP connections.
+Therefore, in **Java**, the _selector_ wakes up once per minute (using a
+timeout) to clean expired (in practice, unused for more than 2 minutes) UDP
+connections. In **Rust**, each UDP connection task terminates itself after 2
+minutes without any packet.
 
 
 #### TCP connection
@@ -409,18 +424,19 @@ retransmission mechanism**.
 
 [contraposition]: https://en.wikipedia.org/wiki/Contraposition
 
-To prevent retrieving a packet while our buffers are full, we indicate that we
-are not interested in reading ([`interestOps`][nio/interestOps] |
-[`interest`][mio/reregister]) the TCP channel when some pending data remain to
-be written to the client buffer. Once some space becomes available, the client
-then _pulls_ the available packets from the `TcpConnection`s, which are _packet
-sources_ ([`PacketSource`][java/PacketSource] |
-[`PacketSource`][rust/packet-source]).
+To prevent retrieving a packet while our buffers are full, in **Java**, we
+indicate that we are not interested in reading
+([`interestOps`][nio/interestOps]) the TCP channel when some pending data
+remain to be written to the client buffer. Once some space becomes available,
+the client then _pulls_ the available packets from the `TCPConnection`s, which
+are _packet sources_ ([`PacketSource`][java/PacketSource]).
+
+In **Rust**, a `TcpConnection` reads from the network only when its _outbox_ is
+empty. When the client channel is full, the packet just read waits in the
+_outbox_, and the connection stops reading until the channel has room for it.
 
 [nio/interestOps]: https://developer.android.com/reference/java/nio/channels/SelectionKey.html#interestOps%28int%29
-[mio/reregister]: https://docs.rs/mio/0.6.10/mio/struct.Poll.html#method.reregister
 [java/PacketSource]: relay-java/src/main/java/com/genymobile/gnirehtet/relay/PacketSource.java
-[rust/packet-source]: relay-rust/src/relay/packet\_source.rs
 
 
 ## Hack
