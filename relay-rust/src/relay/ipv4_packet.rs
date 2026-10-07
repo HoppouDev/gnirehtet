@@ -61,7 +61,7 @@ impl<'a> Ipv4Packet<'a> {
         (&self.ipv4_header_data, self.transport_header_data.as_ref())
     }
 
-    pub fn headers(&self) -> (Ipv4Header, Option<TransportHeader>) {
+    pub fn headers(&self) -> (Ipv4Header<'_>, Option<TransportHeader<'_>>) {
         let transport_index = self.ipv4_header_data.header_length() as usize;
         if let Some(ref transport_header_data) = self.transport_header_data {
             let (ipv4_header_slice, transport_slice) = self.raw.split_at(transport_index);
@@ -86,14 +86,14 @@ impl<'a> Ipv4Packet<'a> {
 
     #[inline]
     #[allow(dead_code)]
-    pub fn ipv4_header(&self) -> Ipv4Header {
+    pub fn ipv4_header(&self) -> Ipv4Header<'_> {
         let slice = &self.raw[..self.ipv4_header_data.header_length() as usize];
         self.ipv4_header_data.bind(slice)
     }
 
     #[inline]
     #[allow(dead_code)]
-    pub fn ipv4_header_mut(&mut self) -> Ipv4HeaderMut {
+    pub fn ipv4_header_mut(&mut self) -> Ipv4HeaderMut<'_> {
         let slice = &mut self.raw[..self.ipv4_header_data.header_length() as usize];
         self.ipv4_header_data.bind_mut(slice)
     }
@@ -105,7 +105,7 @@ impl<'a> Ipv4Packet<'a> {
     }
 
     #[inline]
-    pub fn transport_header(&self) -> Option<TransportHeader> {
+    pub fn transport_header(&self) -> Option<TransportHeader<'_>> {
         if let Some(ref transport_header_data) = self.transport_header_data {
             let start = self.ipv4_header_data.header_length() as usize;
             let end = start + transport_header_data.header_length() as usize;
@@ -124,7 +124,7 @@ impl<'a> Ipv4Packet<'a> {
 
     #[inline]
     #[allow(dead_code)]
-    fn transport_header_mut(&mut self) -> Option<TransportHeaderMut> {
+    fn transport_header_mut(&mut self) -> Option<TransportHeaderMut<'_>> {
         if let Some(ref mut transport_header_data) = self.transport_header_data {
             let start = self.ipv4_header_data.header_length() as usize;
             let end = start + transport_header_data.header_length() as usize;
@@ -146,7 +146,7 @@ impl<'a> Ipv4Packet<'a> {
     ///  - the transport header (if any)
     ///  - the payload (if there is a transport at all)
     #[allow(dead_code)]
-    pub fn split(&self) -> (Ipv4Header, Option<(TransportHeader, &[u8])>) {
+    pub fn split(&self) -> (Ipv4Header<'_>, Option<(TransportHeader<'_>, &[u8])>) {
         let transport_index = self.ipv4_header_data.header_length() as usize;
         if let Some(ref transport_header_data) = self.transport_header_data {
             // payload_index is relative to transport
@@ -167,7 +167,12 @@ impl<'a> Ipv4Packet<'a> {
     ///  - the IP v4 header
     ///  - the transport header (if any)
     ///  - the payload (if there is a transport at all)
-    pub fn split_mut(&mut self) -> (Ipv4HeaderMut, Option<(TransportHeaderMut, &mut [u8])>) {
+    pub fn split_mut(
+        &mut self,
+    ) -> (
+        Ipv4HeaderMut<'_>,
+        Option<(TransportHeaderMut<'_>, &mut [u8])>,
+    ) {
         let transport_index = self.ipv4_header_data.header_length() as usize;
         if let Some(ref mut transport_header_data) = self.transport_header_data {
             // payload_index is relative to transport
@@ -229,8 +234,7 @@ mod tests {
     use byteorder::{BigEndian, WriteBytesExt};
 
     fn create_packet() -> Vec<u8> {
-        let mut raw = Vec::new();
-        raw.reserve(32);
+        let mut raw = Vec::with_capacity(32);
 
         raw.write_u8(4u8 << 4 | 5).unwrap(); // version_and_ihl
         raw.write_u8(0).unwrap(); //ToS
@@ -265,8 +269,7 @@ mod tests {
             assert_eq!(0x12345678, ipv4_header.source());
             assert_eq!(0x42424242, ipv4_header.destination());
 
-            if let Some(&TransportHeaderData::Udp(ref udp_header)) =
-                ipv4_packet.transport_header_data()
+            if let Some(TransportHeaderData::Udp(udp_header)) = ipv4_packet.transport_header_data()
             {
                 assert_eq!(1234, udp_header.source_port());
                 assert_eq!(5678, udp_header.destination_port());

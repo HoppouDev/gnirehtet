@@ -138,10 +138,7 @@ macro_rules! tcp_header_common {
         #[allow(dead_code)]
         impl<'a> $name<'a> {
             pub fn new(raw: $raw_type, data: $data_type) -> Self {
-                Self {
-                    raw: raw,
-                    data: data,
-                }
+                Self { raw, data }
             }
 
             #[inline]
@@ -304,7 +301,7 @@ impl<'a> TcpHeaderMut<'a> {
             ipv4_header_data.total_length() - u16::from(ipv4_header_data.header_length());
 
         let header_length = self.header_length();
-        debug_assert!(header_length % 2 == 0 && header_length >= 20);
+        debug_assert!(header_length.is_multiple_of(2) && header_length >= 20);
 
         let payload_length = transport_length - u16::from(header_length);
         debug_assert_eq!(
@@ -345,7 +342,7 @@ impl<'a> TcpHeaderMut<'a> {
                 sum += u32::from(*p.offset(1));
                 p = p.offset(2);
             }
-            if payload_length % 2 != 0 {
+            if !payload_length.is_multiple_of(2) {
                 // if payload length is odd, the last byte is considered high-order
                 hsum += u32::from(*payload.get_unchecked((payload_length - 1) as usize));
             }
@@ -362,6 +359,8 @@ impl<'a> TcpHeaderMut<'a> {
 }
 
 #[cfg(test)]
+// the expected checksums list every 16-bit word of the headers, zeros included
+#[allow(clippy::identity_op)]
 mod tests {
     use super::*;
     use crate::relay::ipv4_packet::Ipv4Packet;
@@ -369,8 +368,7 @@ mod tests {
     use byteorder::{BigEndian, WriteBytesExt};
 
     fn create_packet() -> Vec<u8> {
-        let mut raw = Vec::new();
-        raw.reserve(44);
+        let mut raw = Vec::with_capacity(44);
 
         raw.write_u8(4u8 << 4 | 5).unwrap(); // version_and_ihl
         raw.write_u8(0).unwrap(); //ToS
@@ -397,8 +395,7 @@ mod tests {
     }
 
     fn create_odd_packet() -> Vec<u8> {
-        let mut raw = Vec::new();
-        raw.reserve(45);
+        let mut raw = Vec::with_capacity(45);
 
         raw.write_u8(4u8 << 4 | 5).unwrap(); // version_and_ihl
         raw.write_u8(0).unwrap(); //ToS
@@ -427,8 +424,7 @@ mod tests {
     }
 
     fn create_empty_packet() -> Vec<u8> {
-        let mut raw = Vec::new();
-        raw.reserve(40);
+        let mut raw = Vec::with_capacity(40);
 
         raw.write_u8(4u8 << 4 | 5).unwrap(); // version_and_ihl
         raw.write_u8(0).unwrap(); //ToS
@@ -453,8 +449,7 @@ mod tests {
     }
 
     fn create_tcp_header() -> Vec<u8> {
-        let mut raw = Vec::new();
-        raw.reserve(20);
+        let mut raw = Vec::with_capacity(20);
 
         raw.write_u16::<BigEndian>(0x1234).unwrap(); // source port
         raw.write_u16::<BigEndian>(0x5678).unwrap(); // destination port
@@ -638,8 +633,7 @@ mod tests {
     }
 
     fn create_long_packet() -> Vec<u8> {
-        let mut raw = Vec::new();
-        raw.reserve(45);
+        let mut raw = Vec::with_capacity(45);
 
         raw.write_u8(4u8 << 4 | 5).unwrap(); // version_and_ihl
         raw.write_u8(0).unwrap(); //ToS

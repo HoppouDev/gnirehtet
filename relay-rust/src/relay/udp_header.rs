@@ -73,10 +73,7 @@ macro_rules! udp_header_common {
         #[allow(dead_code)]
         impl<'a> $name<'a> {
             pub fn new(raw: $raw_type, data: $data_type) -> Self {
-                Self {
-                    raw: raw,
-                    data: data,
-                }
+                Self { raw, data }
             }
 
             #[inline]
@@ -161,8 +158,7 @@ mod tests {
     use byteorder::{BigEndian, WriteBytesExt};
 
     fn create_header() -> Vec<u8> {
-        let mut raw = Vec::new();
-        raw.reserve(8);
+        let mut raw = Vec::with_capacity(8);
         raw.write_u16::<BigEndian>(1234).unwrap(); // source port
         raw.write_u16::<BigEndian>(5678).unwrap(); // destination port
         raw.write_u16::<BigEndian>(42).unwrap(); // length

@@ -551,7 +551,7 @@ fn must_install_client(serial: Option<&str>) -> Result<bool, CommandExecutionErr
                 // read the versionCode of the installed package
                 if let Some(index) = dumpsys.find("    versionCode=") {
                     let start = index + 16; // size of "    versionCode=\""
-                    if let Some(end) = (&dumpsys[start..]).find(' ') {
+                    if let Some(end) = dumpsys[start..].find(' ') {
                         let installed_version_code = &dumpsys[start..start + end];
                         Ok(installed_version_code != REQUIRED_APK_VERSION_CODE)
                     } else {

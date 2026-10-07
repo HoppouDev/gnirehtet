@@ -498,11 +498,11 @@ impl TcpConnection {
             self.handle_fin();
         }
 
-        if let Some(fin_sequence_number) = self.tcb.fin_sequence_number {
-            if tcp_header.acknowledgement_number() == fin_sequence_number + 1 {
-                cx_debug!(target: TAG, self.id, "Received ACK of FIN");
-                self.handle_fin_ack();
-            }
+        if let Some(fin_sequence_number) = self.tcb.fin_sequence_number
+            && tcp_header.acknowledgement_number() == fin_sequence_number + 1
+        {
+            cx_debug!(target: TAG, self.id, "Received ACK of FIN");
+            self.handle_fin_ack();
         }
     }
 

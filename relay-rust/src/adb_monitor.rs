@@ -169,12 +169,11 @@ impl AdbMonitor {
             .lines()
             .filter_map(|line| {
                 let mut split = line.split_whitespace();
-                if let Some(serial) = split.next() {
-                    if let Some(state) = split.next() {
-                        if state == "device" {
-                            return Some(serial.to_string());
-                        }
-                    }
+                if let Some(serial) = split.next()
+                    && let Some(state) = split.next()
+                    && state == "device"
+                {
+                    return Some(serial.to_string());
                 }
                 None
             })
@@ -207,10 +206,7 @@ impl AdbMonitor {
 
     fn start_adb_daemon() -> bool {
         info!(target: TAG, "Restarting adb daemon");
-        match process::Command::new("adb")
-            .args(&["start-server"])
-            .status()
-        {
+        match process::Command::new("adb").args(["start-server"]).status() {
             Ok(exit_status) => {
                 if exit_status.success() {
                     true

@@ -109,10 +109,7 @@ macro_rules! ipv4_header_common {
         #[allow(dead_code)]
         impl<'a> $name<'a> {
             pub fn new(raw: $raw_type, data: $data_type) -> Self {
-                Self {
-                    raw: raw,
-                    data: data,
-                }
+                Self { raw, data }
             }
 
             pub fn raw(&self) -> &[u8] {
@@ -208,13 +205,14 @@ impl<'a> Ipv4HeaderMut<'a> {
 }
 
 #[cfg(test)]
+// the expected checksum lists every 16-bit word of the header, zeros included
+#[allow(clippy::identity_op)]
 mod tests {
     use super::*;
     use byteorder::{BigEndian, WriteBytesExt};
 
     fn create_header() -> Vec<u8> {
-        let mut raw: Vec<u8> = Vec::new();
-        raw.reserve(20);
+        let mut raw: Vec<u8> = Vec::with_capacity(20);
         raw.write_u8(4u8 << 4 | 5).unwrap(); // version_and_ihl
         raw.write_u8(0).unwrap(); //ToS
         raw.write_u16::<BigEndian>(28).unwrap(); // total length
