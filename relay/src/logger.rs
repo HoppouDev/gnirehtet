@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-use std::io::{self, IsTerminal};
+use std::io::{self};
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
@@ -32,7 +32,5 @@ pub fn init() {
         .with_env_filter(filter)
         .with_timer(ChronoLocal::new("%Y-%m-%d %H:%M:%S%.3f".to_owned()))
         .with_writer(io::stderr.with_max_level(Level::ERROR).or_else(io::stdout))
-        // no color codes when the output is redirected to a file
-        .with_ansi(io::stdout().is_terminal())
         .init();
 }
