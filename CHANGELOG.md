@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v3.0.1](https://github.com/HoppouDev/gnirehtet/compare/21508b208a51f2fe0aa608284035a60ef5c1cc0d..v3.0.1) - 2026-10-09
+#### Bug Fixes
+- (**relay**) add color back to the logger - ([21508b2](https://github.com/HoppouDev/gnirehtet/commit/21508b208a51f2fe0aa608284035a60ef5c1cc0d)) - HoppouDev
+
+- - -
+
 ## [v3.0.0](https://github.com/HoppouDev/gnirehtet/compare/3d4d9361222668d3633a33abdd348337a2f9a1d1..v3.0.0) - 2026-10-07
 #### Features
 - (**relay**) configure logs with RUST_LOG using tracing - ([38225d6](https://github.com/HoppouDev/gnirehtet/commit/38225d618abbe7b7bb0c294a27d8e15330df93a5)) - HoppouDev
